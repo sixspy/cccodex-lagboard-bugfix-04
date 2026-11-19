@@ -22,7 +22,7 @@
   .seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .seg button{border:0;background:transparent;padding:9px 12px;cursor:pointer}
   .seg button.on{background:var(--blue);color:#fff}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+  .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
   .card h3{margin:0;font-size:12px;color:#64748b;font-weight:500}
   .card strong{display:block;font-family:"Segoe UI",system-ui,sans-serif;font-size:28px;margin-top:6px}
@@ -58,11 +58,14 @@ createApp({
     const token=ref(localStorage.getItem('lagboard_token')||'');
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const sources=ref([]), arrivals=ref([]), catchups=ref([]), audit=ref([]), overview=ref({grading:[],water:{},homogeneous:true});
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐恢复','审计流水'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
+    const writable=computed(()=>sources.value.filter(s=>s.output_mode==='可写').length);
+    const levelClass=computed(()=>({正常:'ok',告警:'warn',违约:'bad'}));
+    const levelBadge=computed(()=>({正常:'正常 · 可写',告警:'告警 · 降级只读',违约:'违约 · 冻结'}));
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
@@ -88,17 +91,22 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const u=await loadJson('/api/audit'); if(u===null) return;
+      audit.value=Array.isArray(u.items)?u.items:[];
+      const o=await loadJson('/api/overview'); if(o===null) return;
+      overview.value=o;
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
     }
     async function recordArrival(){
       actionErr.value='';
       const r=await fetch('/api/arrivals',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):(j.detail||'失败');
+      const j=await r.json();
+      actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):((j.detail&&j.detail.code)||j.detail||'失败');
       await refresh();
     }
-    async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
+    async function doCatchup(name){const r=await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});const j=await r.json().catch(()=>({}));if(!r.ok){actionErr.value=j.detail||'补齐失败';}await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,audit,overview,form,actionErr,frozen,degraded,writable,levelClass,levelBadge,modeClass,login,logout,recordArrival,doCatchup};
   },
   template:`
   <div v-if="!token" class="login">
@@ -114,7 +122,7 @@ createApp({
       <div class="src" v-for="s in sources" :key="s.id">
         <b>{{s.name}}</b>
         <span>SLA {{s.sla_minutes}} 分钟</span>
-        <div class="mode" :class="modeClass(s.output_mode)">{{s.output_mode}}</div>
+        <div class="mode" :class="modeClass(s.output_mode)">{{levelBadge[s.level]||s.level}} · v{{s.version}}</div>
       </div>
       <div style="margin-top:18px;font-size:12px;color:#9db0cc">{{user}} · <a href="#" style="color:#fff" @click.prevent="logout">退出</a></div>
     </aside>
@@ -123,10 +131,13 @@ createApp({
         <div class="seg"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
       </div>
       <div class="cards">
-        <div class="card"><h3>源数量</h3><strong>{{sources.length}}</strong></div>
-        <div class="card"><h3>冻结中</h3><strong>{{frozen}}</strong></div>
-        <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
+        <div class="card"><h3>源数量</h3><strong>{{overview.water.sources ?? sources.length}}</strong></div>
+        <div class="card"><h3>可写</h3><strong>{{overview.water.writable ?? writable}}</strong></div>
+        <div class="card"><h3>降级只读</h3><strong>{{overview.water.degraded ?? degraded}}</strong></div>
+        <div class="card"><h3>冻结中</h3><strong>{{overview.water.frozen ?? frozen}}</strong></div>
+        <div class="card"><h3>违约水位</h3><strong>{{overview.water.breach ?? 0}}</strong></div>
       </div>
+      <div v-if="overview.homogeneous===false" class="err" style="font-size:13px">分裂撕裂：等级牌与输出牌不同态，已拒绝放行。</div>
       <div class="card" v-show="tab===0">
         <h3 style="margin-bottom:8px">登记到达</h3>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
@@ -139,16 +150,19 @@ createApp({
         <div class="timeline" style="margin-top:16px">
           <div class="item" v-for="a in (arrivals||[]).slice(0,8)" :key="a.id">
             <b>{{a.source}}</b> · 滞后 {{a.lag_minutes}} 分 · {{a.level}}
-            <div style="color:#64748b;font-size:12px">{{a.source_clock}} → {{a.ingest_clock}}</div>
+            <span class="mode" :class="modeClass(a.current_output_mode)" style="margin-left:6px">{{levelBadge[a.current_level]||a.current_level}}</span>
+            <div style="color:#64748b;font-size:12px">{{a.source_clock}} → {{a.ingest_clock}} · 卡片态 {{a.current_level}}/{{a.current_output_mode}}</div>
           </div>
         </div>
       </div>
       <div class="card" v-show="tab===1">
         <h3>分级规则</h3>
-        <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。</p>
-        <table><thead><tr><th>源</th><th>SLA</th><th>输出态</th><th></th></tr></thead>
-        <tbody><tr v-for="s in sources" :key="'g'+s.id">
-          <td>{{s.name}}</td><td>{{s.sla_minutes}}</td><td>{{s.output_mode}}</td>
+        <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。违约源仅补齐解冻，新到达不得绕过。</p>
+        <table><thead><tr><th>源</th><th>SLA</th><th>等级牌</th><th>输出牌</th><th>版本</th><th></th></tr></thead>
+        <tbody><tr v-for="s in overview.grading" :key="'g'+s.name">
+          <td>{{s.name}}</td><td>{{s.sla_minutes}}</td>
+          <td><span class="mode" :class="modeClass(s.output_mode)">{{s.level}}</span></td>
+          <td>{{s.output_mode}}</td><td>v{{s.version}}</td>
           <td><button class="ghost" @click="doCatchup(s.name)">补齐恢复</button></td>
         </tr></tbody></table>
       </div>
@@ -156,6 +170,14 @@ createApp({
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3>审计流水</h3>
+        <table><thead><tr><th>事件</th><th>源</th><th>详情</th><th>等级牌</th><th>输出牌</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="x in audit" :key="x.id">
+          <td>{{x.event}}</td><td>{{x.source}}</td><td>{{x.detail}}</td>
+          <td>{{x.state_level}}</td><td>{{x.state_mode}}</td><td>{{x.created_at}}</td>
+        </tr></tbody></table>
       </div>
     </main>
   </div>`
